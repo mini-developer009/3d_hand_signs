@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ashik Gesture Engine v4.0 - Ultra Bright</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #0a0a0a; font-family: 'Segoe UI', sans-serif; }
+        #webcam-container {
+            position: absolute; top: 15px; right: 15px;
+            width: 220px; height: 165px; border: 2px solid #00f2ff; border-radius: 12px;
+            overflow: hidden; transform: scaleX(-1); box-shadow: 0 0 20px rgba(0,242,255,0.5);
+        }
+        #webcam, #output_canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+        #ui { position: absolute; top: 20px; left: 20px; color: #00f2ff; pointer-events: none; }
+        .controls { 
+            position: absolute; bottom: 30px; left: 20px; 
+            background: rgba(0,0,0,0.8); padding: 20px; border-radius: 12px; border: 1px solid #00f2ff;
+        }
+        input[type="file"] { pointer-events: auto; color: white; margin-top: 10px; }
+        #status { color: #00ff00; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>GESTURE ENGINE v4.0</h1>
+        <p id="status">Ready for GT-R Upload...</p>
+    </div>
+
+    <div class="controls">
+        <label style="color:white">SELECT YOUR GT-R (.GLB):</label><br>
+        <input type="file" id="carPicker" accept=".glb,.gltf">
+    </div>
+
+    <div id="webcam-container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+        import { HandLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+        let scene, camera, renderer, carModel, handLandmarker;
+        let lastVideoTime = -1;
+        const status = document.getElementById("status");
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2, 8);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            
+            // --- CINEMATIC LIGHTING SETTINGS ---
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.5; // Crank this up if it's still dark!
+            renderer.outputColorSpace = THREE.SRGBColorSpace;
+            document.body.appendChild(renderer.domElement);
+
+            // 1. Physical Lights
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 3);
+            scene.add(hemiLight);
+
+            const sunLight = new THREE.DirectionalLight(0xffffff, 5);
+            sunLight.position.set(5, 10, 7);
+            scene.add(sunLight);
+
+            // 2. Environment Map (Fake Studio Reflections)
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+            scene.environment = pmremGenerator.fromScene(new THREE.Scene()).texture;
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // --- FILE LOADER WITH AUTO-BRIGHTNESS ---
+        document.getElementById('carPicker').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const loader = new GLTFLoader();
+                const url = URL.createObjectURL(new Blob([event.target.result]));
+                status.innerText = "UPDATING SHADERS...";
+                
+                loader.load(url, (gltf) => {
+                    if(carModel) scene.remove(carModel); 
+                    carModel = gltf.scene;
+
+                    // Standardize size
+                    const box = new THREE.Box3().setFromObject(carModel);
+                    const size = box.getSize(new THREE.Vector3());
+                    const center = box.getCenter(new THREE.Vector3());
+                    const scale = 5 / Math.max(size.x, size.y, size.z);
+                    carModel.scale.setScalar(scale);
+                    carModel.position.sub(center.multiplyScalar(scale));
+                    carModel.position.y = 0;
+
+                    scene.add(carModel);
+                    status.innerText = "GT-R ACTIVE: USE HANDS TO SPIN";
+                });
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // --- HAND TRACKING ---
+        async function setupAI() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`, delegate: "GPU" },
+                runningMode: "VIDEO", numHands: 1
+            });
+            navigator.mediaDevices.getUserMedia({ video: true }).then((s) => { video.srcObject = s; video.addEventListener("loadeddata", loop); });
+        }
+
+        function loop() {
+            if (video.currentTime !== lastVideoTime) {
+                const results = handLandmarker.detectForVideo(video, performance.now());
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                if (results.landmarks && results.landmarks.length > 0) {
+                    const hand = results.landmarks[0];
+                    new DrawingUtils(canvasCtx).drawConnectors(hand, HandLandmarker.HAND_CONNECTIONS, { color: "#00f2ff", lineWidth: 2 });
+                    if (carModel) {
+                        carModel.rotation.y = THREE.MathUtils.lerp(carModel.rotation.y, (hand[0].x - 0.5) * 10, 0.1);
+                        const pinch = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+                        camera.position.z = THREE.MathUtils.lerp(camera.position.z, pinch < 0.08 ? 4 : 8, 0.05);
+                    }
+                }
+                lastVideoTime = video.currentTime;
+            }
+            renderer.render(scene, camera);
+            requestAnimationFrame(loop);
+        }
+
+        init();
+        setupAI();
+    </script>
+</body>
+</html>
